@@ -25,6 +25,7 @@ type Assumptions = {
 };
 
 type VehicleStatus = "Im Einsatz" | "Einsatzbereit" | "Werkstatt";
+type FleetSummaryMode = "Verfügbar" | "Im Einsatz" | "Werkstatt";
 
 type Vehicle = {
   id: string;
@@ -316,6 +317,10 @@ export default function Home() {
   const [memberFormOpen, setMemberFormOpen] = useState(false);
   const [vehicleFormOpen, setVehicleFormOpen] = useState(false);
   const [driverFormOpen, setDriverFormOpen] = useState(false);
+  const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
+  const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
+  const [editingDriverId, setEditingDriverId] = useState<string | null>(null);
+  const [fleetSummaryMode, setFleetSummaryMode] = useState<FleetSummaryMode>("Verfügbar");
   const [memberDraft, setMemberDraft] = useState(EMPTY_MEMBER);
   const [vehicleDraft, setVehicleDraft] = useState(EMPTY_VEHICLE);
   const [driverDraft, setDriverDraft] = useState(EMPTY_DRIVER);
@@ -410,6 +415,7 @@ export default function Home() {
   }, [toast]);
 
   const currentMember = members.find((member) => member.id === sessionMemberId);
+  const ownerMember = members.find((member) => member.role === "Owner") ?? INITIAL_MEMBERS[0];
   const canManage = currentMember?.role === "Owner" || currentMember?.role === "Administrator";
   const selectedTour = tours.find((tour) => tour.id === selectedTourId) ?? tours[0];
   const selectedVehicle = vehicles.find((vehicle) => vehicle.id === selectedTour?.vehicleId) ?? vehicles.find((vehicle) => vehicle.id === selectedVehicleId) ?? vehicles[0];
@@ -445,6 +451,9 @@ export default function Home() {
     return true;
   });
   const fleetInService = vehicles.filter((vehicle) => vehicle.status === "Im Einsatz").length;
+  const fleetAvailable = vehicles.filter((vehicle) => vehicle.status === "Einsatzbereit").length;
+  const fleetInWorkshop = vehicles.filter((vehicle) => vehicle.status === "Werkstatt").length;
+  const fleetSummaryCount = fleetSummaryMode === "Verfügbar" ? fleetAvailable : fleetSummaryMode === "Im Einsatz" ? fleetInService : fleetInWorkshop;
   const systemWarnings = [
     ...(selectedVehicle?.status === "Werkstatt" ? [`${selectedVehicle.plate} ist als Werkstatt gemeldet und kann nicht eingeplant werden.`] : []),
     ...(!selectedDriver?.active ? [`${shortName(selectedDriver)} ist derzeit nicht aktiv.`] : []),
@@ -496,16 +505,32 @@ export default function Home() {
   const updateJobText = (key: "pickup" | "delivery", value: string) =>
     setDraft((current) => ({ ...current, [key]: value }));
 
-  const addMember = async () => {
-    if (!memberDraft.firstName.trim() || !memberDraft.lastName.trim() || !memberDraft.email.includes("@")) { notify("Bitte Vorname, Nachname und eine gültige E-Mail eintragen."); return; }
-    if (!/^\d{4,6}$/.test(memberDraft.pin)) { notify("Die Start-PIN muss aus 4 bis 6 Ziffern bestehen."); return; }
-    if (members.some((member) => member.email.toLowerCase() === memberDraft.email.trim().toLowerCase())) { notify("Diese E-Mail ist bereits freigegeben."); return; }
-    const pinHash = await hashPin(memberDraft.pin);
-    const member: WorkspaceMember = { firstName: memberDraft.firstName.trim(), lastName: memberDraft.lastName.trim(), email: memberDraft.email.trim(), role: memberDraft.role, pinHash, id: `M-${Date.now()}`, status: "Eingeladen", addedAt: new Intl.DateTimeFormat("de-DE", { day: "2-digit", month: "short", year: "numeric" }).format(new Date()) };
-    setMembers((current) => [...current, member]);
+  const startMemberCreate = () => {
+    setEditingMemberId(null);
     setMemberDraft(EMPTY_MEMBER);
+    setMemberFormOpen(true);
+  };
+
+  const startMemberEdit = (member: WorkspaceMember) => {
+    setEditingMemberId(member.id);
+    setMemberDraft({ firstName: member.firstName, lastName: member.lastName, email: member.email, role: member.role, pin: "" });
+    setMemberFormOpen(true);
+  };
+
+  const saveMember = async () => {
+    if (!memberDraft.firstName.trim() || !memberDraft.lastName.trim() || !memberDraft.email.includes("@")) { notify("Bitte Vorname, Nachname und eine gültige E-Mail eintragen."); return; }
+    if (!editingMemberId && !/^\d{4,6}$/.test(memberDraft.pin)) { notify("Die Start-PIN muss aus 4 bis 6 Ziffern bestehen."); return; }
+    if (editingMemberId && memberDraft.pin && !/^\d{4,6}$/.test(memberDraft.pin)) { notify("Die neue PIN muss aus 4 bis 6 Ziffern bestehen."); return; }
+    if (members.some((member) => member.id !== editingMemberId && member.email.toLowerCase() === memberDraft.email.trim().toLowerCase())) { notify("Diese E-Mail ist bereits freigegeben."); return; }
+    const existing = members.find((member) => member.id === editingMemberId);
+    const pinHash = memberDraft.pin ? await hashPin(memberDraft.pin) : existing?.pinHash;
+    const role = existing?.role === "Owner" ? "Owner" : memberDraft.role;
+    const member: WorkspaceMember = { firstName: memberDraft.firstName.trim(), lastName: memberDraft.lastName.trim(), email: memberDraft.email.trim(), role, pinHash, id: editingMemberId ?? `M-${Date.now()}`, status: existing?.status ?? "Eingeladen", addedAt: existing?.addedAt ?? new Intl.DateTimeFormat("de-DE", { day: "2-digit", month: "short", year: "numeric" }).format(new Date()) };
+    setMembers((current) => editingMemberId ? current.map((item) => item.id === editingMemberId ? member : item) : [...current, member]);
+    setMemberDraft(EMPTY_MEMBER);
+    setEditingMemberId(null);
     setMemberFormOpen(false);
-    notify(`${member.firstName} ${member.lastName} wurde als ${member.role} angelegt.`);
+    notify(editingMemberId ? `${member.firstName} ${member.lastName} wurde aktualisiert.` : `${member.firstName} ${member.lastName} wurde als ${member.role} angelegt.`);
   };
 
   const login = async (event: React.FormEvent) => {
@@ -562,22 +587,48 @@ export default function Home() {
     notify(`${jobId} wurde ${target?.name ?? "der Tour"} zugeordnet.`);
   };
 
-  const addVehicle = () => {
-    if (!vehicleDraft.name.trim() || !vehicleDraft.plate.trim()) { notify("Bitte Fahrzeug und Kennzeichen eintragen."); return; }
-    const vehicle: Vehicle = { ...vehicleDraft, id: `V-${Date.now()}` };
-    setVehicles((current) => [...current, vehicle]);
+  const startVehicleCreate = () => {
+    setEditingVehicleId(null);
     setVehicleDraft(EMPTY_VEHICLE);
-    setVehicleFormOpen(false);
-    notify(`${vehicle.name} · ${vehicle.plate} wurde angelegt.`);
+    setVehicleFormOpen(true);
   };
 
-  const addDriver = () => {
-    if (!driverDraft.firstName.trim() || !driverDraft.lastName.trim()) { notify("Bitte Vor- und Nachname des Fahrers eintragen."); return; }
-    const driver: Driver = { ...driverDraft, id: `D-${Date.now()}` };
-    setDrivers((current) => [...current, driver]);
+  const startVehicleEdit = (vehicle: Vehicle) => {
+    setEditingVehicleId(vehicle.id);
+    setVehicleDraft({ name: vehicle.name, plate: vehicle.plate, driverId: vehicle.driverId, status: vehicle.status, maintenanceRate: vehicle.maintenanceRate, depreciationRate: vehicle.depreciationRate, fixedMonthlyCost: vehicle.fixedMonthlyCost, capacityTons: vehicle.capacityTons });
+    setVehicleFormOpen(true);
+  };
+
+  const saveVehicle = () => {
+    if (!vehicleDraft.name.trim() || !vehicleDraft.plate.trim()) { notify("Bitte Fahrzeug und Kennzeichen eintragen."); return; }
+    const vehicle: Vehicle = { ...vehicleDraft, name: vehicleDraft.name.trim(), plate: vehicleDraft.plate.trim(), id: editingVehicleId ?? `V-${Date.now()}` };
+    setVehicles((current) => editingVehicleId ? current.map((item) => item.id === editingVehicleId ? vehicle : item) : [...current, vehicle]);
+    setVehicleDraft(EMPTY_VEHICLE);
+    setEditingVehicleId(null);
+    setVehicleFormOpen(false);
+    notify(editingVehicleId ? `${vehicle.name} · ${vehicle.plate} wurde aktualisiert.` : `${vehicle.name} · ${vehicle.plate} wurde angelegt.`);
+  };
+
+  const startDriverCreate = () => {
+    setEditingDriverId(null);
     setDriverDraft(EMPTY_DRIVER);
+    setDriverFormOpen(true);
+  };
+
+  const startDriverEdit = (driver: Driver) => {
+    setEditingDriverId(driver.id);
+    setDriverDraft({ firstName: driver.firstName, lastName: driver.lastName, hourlyRate: driver.hourlyRate, active: driver.active });
+    setDriverFormOpen(true);
+  };
+
+  const saveDriver = () => {
+    if (!driverDraft.firstName.trim() || !driverDraft.lastName.trim()) { notify("Bitte Vor- und Nachname des Fahrers eintragen."); return; }
+    const driver: Driver = { ...driverDraft, firstName: driverDraft.firstName.trim(), lastName: driverDraft.lastName.trim(), id: editingDriverId ?? `D-${Date.now()}` };
+    setDrivers((current) => editingDriverId ? current.map((item) => item.id === editingDriverId ? driver : item) : [...current, driver]);
+    setDriverDraft(EMPTY_DRIVER);
+    setEditingDriverId(null);
     setDriverFormOpen(false);
-    notify(`${shortName(driver)} wurde als Fahrer angelegt.`);
+    notify(editingDriverId ? `${shortName(driver)} wurde aktualisiert.` : `${shortName(driver)} wurde als Fahrer angelegt.`);
   };
 
   const updateMemberRole = (memberId: string, role: WorkspaceRole) => {
@@ -679,7 +730,7 @@ export default function Home() {
           {loginError && <p className="auth-error" role="alert">{loginError}</p>}
           <button className="accept-action auth-submit" type="submit">Anmelden</button>
         </form>
-        <div className="preview-access"><strong>Owner-Zugang für diese Vorschau</strong><span>Godsaid Malock · godsaid.malock@tunnelsoft.com · PIN 2580</span></div>
+        <div className="preview-access"><strong>Owner-Zugang für diese Vorschau</strong><span>{memberName(ownerMember)} · {ownerMember.email} · {ownerMember.pinHash === INITIAL_MEMBERS[0].pinHash ? "PIN 2580" : "deine geänderte PIN"}</span></div>
         <p className="auth-footnote">Die Freigabe funktioniert in dieser Vorschau gerätebezogen. E-Mail-Codes und ein echtes serverseitiges Kontosystem werden erst mit dem Authentifizierungs-Backend aktiviert.</p>
       </section>
     </main>;
@@ -739,14 +790,14 @@ export default function Home() {
         </div>
 
         <div className="sidebar-footer">
-          <div className="fleet-status">
+          <button className="fleet-status fleet-summary-button" type="button" onClick={() => setFleetSummaryMode((mode) => mode === "Verfügbar" ? "Im Einsatz" : mode === "Im Einsatz" ? "Werkstatt" : "Verfügbar")} aria-label="Fuhrparkstatus wechseln">
             <div className="fleet-status-head">
-              <span>Fuhrpark heute</span>
-              <strong>{fleetInService} / {vehicles.length}</strong>
+              <span>{fleetSummaryMode} heute</span>
+              <strong>{fleetSummaryCount} / {vehicles.length}</strong>
             </div>
-            <div className="fleet-track"><span style={{ width: `${vehicles.length ? (fleetInService / vehicles.length) * 100 : 0}%` }} /></div>
-            <p>{fleetInService} Fahrzeuge im Einsatz</p>
-          </div>
+            <div className="fleet-track"><span style={{ width: `${vehicles.length ? (fleetSummaryCount / vehicles.length) * 100 : 0}%` }} /></div>
+            <p>{fleetSummaryCount} Fahrzeuge {fleetSummaryMode === "Verfügbar" ? "einsatzbereit" : fleetSummaryMode.toLowerCase()} · klicken zum Wechseln</p>
+          </button>
           <button className="profile-button" type="button" aria-expanded={profileOpen} onClick={() => { setProfileOpen((open) => !open); setNotificationsOpen(false); }}>
             <span className="avatar">{currentMember.firstName.charAt(0)}{currentMember.lastName.charAt(0)}</span>
             <span>
@@ -802,7 +853,7 @@ export default function Home() {
             <section className="team-page" id="team">
               <div className="team-heading">
                 <div><button className="back-link" type="button" onClick={() => navigateTo("cockpit")}>← Zurück zum Cockpit</button><p className="section-kicker">Workspace-Verwaltung</p><h1>Benutzer & Rollen</h1><p>Mitglieder verwalten und Zugriffe klar zuweisen.</p></div>
-                <button className="primary-button member-add-button" type="button" onClick={() => setMemberFormOpen((open) => !open)}>＋ Benutzer anlegen</button>
+                <button className="primary-button member-add-button" type="button" onClick={startMemberCreate}>＋ Benutzer anlegen</button>
               </div>
 
               <div className="seat-grid">
@@ -812,15 +863,15 @@ export default function Home() {
               </div>
 
               {memberFormOpen && <section className="admin-form-panel">
-                <div className="admin-form-head"><div><strong>Neuen Benutzer anlegen</strong><span>Standardmäßig als Member mit eingeschränkten Verwaltungsrechten.</span></div><button type="button" onClick={() => setMemberFormOpen(false)}>×</button></div>
+                <div className="admin-form-head"><div><strong>{editingMemberId ? "Benutzer bearbeiten" : "Neuen Benutzer anlegen"}</strong><span>{editingMemberId ? "Name, E-Mail, Rolle und auf Wunsch die PIN aktualisieren." : "Standardmäßig als Member mit eingeschränkten Verwaltungsrechten."}</span></div><button type="button" onClick={() => { setMemberFormOpen(false); setEditingMemberId(null); setMemberDraft(EMPTY_MEMBER); }}>×</button></div>
                 <div className="admin-form-grid five">
                   <label><span>Vorname</span><input value={memberDraft.firstName} onChange={(event) => setMemberDraft((current) => ({ ...current, firstName: event.target.value }))} placeholder="Vorname" /></label>
                   <label><span>Nachname</span><input value={memberDraft.lastName} onChange={(event) => setMemberDraft((current) => ({ ...current, lastName: event.target.value }))} placeholder="Nachname" /></label>
                   <label><span>E-Mail</span><input type="email" value={memberDraft.email} onChange={(event) => setMemberDraft((current) => ({ ...current, email: event.target.value }))} placeholder="name@firma.de" /></label>
-                  <label><span>Start-PIN</span><input type="password" inputMode="numeric" maxLength={6} value={memberDraft.pin} onChange={(event) => setMemberDraft((current) => ({ ...current, pin: event.target.value.replace(/\D/g, "") }))} placeholder="4–6 Ziffern" /></label>
-                  <label><span>Rolle</span><select value={memberDraft.role} onChange={(event) => setMemberDraft((current) => ({ ...current, role: event.target.value as WorkspaceRole }))}><option>Member</option><option>Administrator</option></select></label>
+                  <label><span>{editingMemberId ? "Neue PIN (optional)" : "Start-PIN"}</span><input type="password" inputMode="numeric" maxLength={6} value={memberDraft.pin} onChange={(event) => setMemberDraft((current) => ({ ...current, pin: event.target.value.replace(/\D/g, "") }))} placeholder={editingMemberId ? "Unverändert lassen" : "4–6 Ziffern"} /></label>
+                  <label><span>Rolle</span><select value={memberDraft.role} disabled={members.find((member) => member.id === editingMemberId)?.role === "Owner"} onChange={(event) => setMemberDraft((current) => ({ ...current, role: event.target.value as WorkspaceRole }))}><option>Member</option><option>Administrator</option>{members.find((member) => member.id === editingMemberId)?.role === "Owner" && <option>Owner</option>}</select></label>
                 </div>
-                <div className="admin-form-actions"><button className="secondary-action" type="button" onClick={() => setMemberFormOpen(false)}>Abbrechen</button><button className="accept-action" type="button" onClick={addMember}>Benutzer speichern</button></div>
+                <div className="admin-form-actions"><button className="secondary-action" type="button" onClick={() => { setMemberFormOpen(false); setEditingMemberId(null); setMemberDraft(EMPTY_MEMBER); }}>Abbrechen</button><button className="accept-action" type="button" onClick={saveMember}>{editingMemberId ? "Änderungen speichern" : "Benutzer speichern"}</button></div>
               </section>}
 
               <section className="members-card">
@@ -831,7 +882,7 @@ export default function Home() {
                     <td><select className="role-select" value={member.role} disabled={member.role === "Owner"} onChange={(event) => updateMemberRole(member.id, event.target.value as WorkspaceRole)}><option>Member</option><option>Administrator</option>{member.role === "Owner" && <option>Owner</option>}</select></td>
                     <td><span className={`member-status ${member.status === "Eingeladen" ? "pending" : ""}`}>{member.status}</span></td>
                     <td>{member.addedAt}</td>
-                    <td><div className="member-actions"><button className="member-pin" type="button" onClick={() => resetMemberPin(member.id)}>PIN setzen</button><button className="member-remove" type="button" disabled={member.role === "Owner"} onClick={() => removeMember(member.id)}>{member.role === "Owner" ? "Geschützt" : "Entfernen"}</button></div></td>
+                    <td><div className="member-actions"><button className="member-edit" type="button" onClick={() => startMemberEdit(member)}>Bearbeiten</button><button className="member-pin" type="button" onClick={() => resetMemberPin(member.id)}>PIN setzen</button><button className="member-remove" type="button" disabled={member.role === "Owner"} onClick={() => removeMember(member.id)}>{member.role === "Owner" ? "Owner geschützt" : "Entfernen"}</button></div></td>
                   </tr>)}
                 </tbody></table></div>
                 {!filteredMembers.length && <p className="empty-members">Keine passenden Benutzer gefunden.</p>}
@@ -1048,31 +1099,33 @@ export default function Home() {
             <article className="management-card fleet-card">
               <div className="card-header compact">
                 <div><p className="section-kicker">Verwaltung</p><h2>Fuhrpark</h2></div>
-                <div className="header-actions"><span className="total-cost">{fleetInService} im Einsatz</span><button className="text-button" type="button" onClick={() => setVehicleFormOpen((open) => !open)}>＋ Fahrzeug</button></div>
+                <div className="header-actions"><span className="total-cost">{fleetAvailable} verfügbar</span><button className="text-button" type="button" onClick={startVehicleCreate}>＋ Fahrzeug</button></div>
               </div>
               {vehicleFormOpen && <div className="compact-admin-form">
+                <div className="inline-form-heading"><strong>{editingVehicleId ? "Fahrzeug bearbeiten" : "Fahrzeug anlegen"}</strong><span>Alle Kostensätze gelten individuell für dieses Fahrzeug.</span></div>
                 <label><span>Fahrzeug / Modell</span><input value={vehicleDraft.name} onChange={(event) => setVehicleDraft((current) => ({ ...current, name: event.target.value }))} placeholder="z. B. MAN TGX" /></label>
                 <label><span>Kennzeichen</span><input value={vehicleDraft.plate} onChange={(event) => setVehicleDraft((current) => ({ ...current, plate: event.target.value }))} placeholder="HH–TP 100" /></label>
                 <label><span>Fahrer</span><select value={vehicleDraft.driverId} onChange={(event) => setVehicleDraft((current) => ({ ...current, driverId: event.target.value }))}><option value="">Nicht zugewiesen</option>{drivers.map((driver) => <option key={driver.id} value={driver.id}>{shortName(driver)}</option>)}</select></label>
+                <label><span>Status</span><select value={vehicleDraft.status} onChange={(event) => setVehicleDraft((current) => ({ ...current, status: event.target.value as VehicleStatus }))}><option>Einsatzbereit</option><option>Im Einsatz</option><option>Werkstatt</option></select></label>
                 <label><span>Wartung / Verschleiß</span><div className="input-unit"><NumericInput min="0" step="0.01" value={vehicleDraft.maintenanceRate} onValue={(value) => setVehicleDraft((current) => ({ ...current, maintenanceRate: value }))} /><b>€/km</b></div></label>
                 <label><span>Wertverlust</span><div className="input-unit"><NumericInput min="0" step="0.01" value={vehicleDraft.depreciationRate} onValue={(value) => setVehicleDraft((current) => ({ ...current, depreciationRate: value }))} /><b>€/km</b></div></label>
                 <label><span>Fixkosten monatlich</span><div className="input-unit"><NumericInput min="0" step="10" value={vehicleDraft.fixedMonthlyCost} onValue={(value) => setVehicleDraft((current) => ({ ...current, fixedMonthlyCost: value }))} /><b>€</b></div></label>
                 <label><span>Nutzlast</span><div className="input-unit"><NumericInput min="0" step="0.5" value={vehicleDraft.capacityTons} onValue={(value) => setVehicleDraft((current) => ({ ...current, capacityTons: value }))} /><b>t</b></div></label>
-                <button className="accept-action compact-save" type="button" onClick={addVehicle}>Fahrzeug speichern</button>
+                <div className="inline-form-actions"><button className="secondary-action" type="button" onClick={() => { setVehicleFormOpen(false); setEditingVehicleId(null); setVehicleDraft(EMPTY_VEHICLE); }}>Abbrechen</button><button className="accept-action" type="button" onClick={saveVehicle}>{editingVehicleId ? "Änderungen speichern" : "Fahrzeug speichern"}</button></div>
               </div>}
               <div className="vehicle-grid">
                 {vehicles.map((vehicle) => (
                   <div className={`vehicle-item ${selectedVehicleId === vehicle.id ? "selected" : ""}`} key={vehicle.id}>
                     <span className="vehicle-symbol">▰</span>
                     <button className="vehicle-copy vehicle-select" type="button" onClick={() => { setSelectedVehicleId(vehicle.id); if (selectedTour) updateSelectedTour({ vehicleId: vehicle.id, driverId: vehicle.driverId || selectedTour.driverId }); if (vehicle.driverId) setSelectedDriverId(vehicle.driverId); notify(`${vehicle.plate} wurde für ${selectedTour?.name ?? "die Tour"} ausgewählt.`); }}><strong>{vehicle.name}</strong><small>{vehicle.plate} · {shortName(drivers.find((driver) => driver.id === vehicle.driverId))}</small><em>{vehicle.maintenanceRate.toLocaleString("de-DE")} € Wartung + {vehicle.depreciationRate.toLocaleString("de-DE")} € Wertverlust /km · {vehicle.capacityTons.toLocaleString("de-DE")} t</em></button>
-                    <button className={`vehicle-status ${vehicle.status === "Werkstatt" ? "repair" : vehicle.status === "Einsatzbereit" ? "ready" : "active"}`} type="button" onClick={() => cycleVehicleStatus(vehicle.id)}>{vehicle.status}</button>
+                    <div className="vehicle-actions"><button className={`vehicle-status ${vehicle.status === "Werkstatt" ? "repair" : vehicle.status === "Einsatzbereit" ? "ready" : "active"}`} type="button" onClick={() => cycleVehicleStatus(vehicle.id)}>{vehicle.status}</button><button className="edit-link" type="button" onClick={() => startVehicleEdit(vehicle)}>Bearbeiten</button></div>
                   </div>
                 ))}
               </div>
               <div className="driver-management">
-                <div className="subsection-head"><div><strong>Fahrer</strong><span>{drivers.length} angelegt</span></div><button className="text-button" type="button" onClick={() => setDriverFormOpen((open) => !open)}>＋ Fahrer</button></div>
-                {driverFormOpen && <div className="driver-form"><input value={driverDraft.firstName} onChange={(event) => setDriverDraft((current) => ({ ...current, firstName: event.target.value }))} placeholder="Vorname" /><input value={driverDraft.lastName} onChange={(event) => setDriverDraft((current) => ({ ...current, lastName: event.target.value }))} placeholder="Nachname" /><div className="input-unit"><NumericInput min="0" step="0.5" value={driverDraft.hourlyRate} onValue={(value) => setDriverDraft((current) => ({ ...current, hourlyRate: value }))} /><b>€/h</b></div><button type="button" onClick={addDriver}>Speichern</button></div>}
-                <div className="driver-chips">{drivers.map((driver) => <button className={selectedDriverId === driver.id ? "selected" : ""} type="button" key={driver.id} onClick={() => { setSelectedDriverId(driver.id); notify(`${shortName(driver)} wurde für AT-0826 ausgewählt.`); }}><span>{driver.firstName.charAt(0)}{driver.lastName.charAt(0)}</span><strong>{shortName(driver)}</strong><small>{driver.hourlyRate.toLocaleString("de-DE")} €/h</small></button>)}</div>
+                <div className="subsection-head"><div><strong>Fahrer</strong><span>{drivers.length} angelegt</span></div><button className="text-button" type="button" onClick={startDriverCreate}>＋ Fahrer</button></div>
+                {driverFormOpen && <div className="driver-form"><div className="inline-form-heading"><strong>{editingDriverId ? "Fahrer bearbeiten" : "Fahrer anlegen"}</strong><span>Name und Personalkostensatz anpassen.</span></div><input value={driverDraft.firstName} onChange={(event) => setDriverDraft((current) => ({ ...current, firstName: event.target.value }))} placeholder="Vorname" /><input value={driverDraft.lastName} onChange={(event) => setDriverDraft((current) => ({ ...current, lastName: event.target.value }))} placeholder="Nachname" /><div className="input-unit"><NumericInput min="0" step="0.5" value={driverDraft.hourlyRate} onValue={(value) => setDriverDraft((current) => ({ ...current, hourlyRate: value }))} /><b>€/h</b></div><label className="driver-active"><input type="checkbox" checked={driverDraft.active} onChange={(event) => setDriverDraft((current) => ({ ...current, active: event.target.checked }))} /> Aktiv einplanbar</label><div className="inline-form-actions"><button className="secondary-action" type="button" onClick={() => { setDriverFormOpen(false); setEditingDriverId(null); setDriverDraft(EMPTY_DRIVER); }}>Abbrechen</button><button className="accept-action" type="button" onClick={saveDriver}>{editingDriverId ? "Änderungen speichern" : "Fahrer speichern"}</button></div></div>}
+                <div className="driver-chips">{drivers.map((driver) => <div className={`driver-chip ${selectedDriverId === driver.id ? "selected" : ""}`} key={driver.id}><button className="driver-select" type="button" onClick={() => { setSelectedDriverId(driver.id); if (selectedTour) updateSelectedTour({ driverId: driver.id }); notify(`${shortName(driver)} wurde für ${selectedTour?.name ?? "die Tour"} ausgewählt.`); }}><span>{driver.firstName.charAt(0)}{driver.lastName.charAt(0)}</span><strong>{shortName(driver)}</strong><small>{driver.hourlyRate.toLocaleString("de-DE")} €/h · {driver.active ? "Aktiv" : "Inaktiv"}</small></button><button className="edit-link" type="button" onClick={() => startDriverEdit(driver)}>Bearbeiten</button></div>)}</div>
               </div>
               <p className="interaction-hint">Fahrzeug und Fahrer auswählen; TourPilot übernimmt deren Kostensätze automatisch in die Kalkulation.</p>
             </article>
